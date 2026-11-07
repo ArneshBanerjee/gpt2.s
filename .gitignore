@@ -1,10 +1,12 @@
-# Model files (500 MB). Create them with: make weights
-*.bin
+# Model files from Hugging Face (550 MB). Get them with: make weights
+model.safetensors
+vocab.json
+merges.txt
 
 # Build output
 build/
 /gpt2
 
-# Python
+# Python (only for tools/verify.py)
 .venv/
 __pycache__/
