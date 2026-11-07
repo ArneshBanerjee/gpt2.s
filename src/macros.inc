@@ -38,26 +38,12 @@
 .equ EOT,      50256
 .equ ROW,      N_EMBD*4            // bytes in one 768-float row
 
-// Weight file: 64-byte header, then fp32 tensors (see tools/export.py).
-.equ W_HEADER,   64
-.equ WPE_OFF,    N_VOCAB*ROW
-.equ LAYER0_OFF, (N_VOCAB+N_CTX)*ROW
-// Byte offsets inside one transformer block.
-.equ L_LN1_W,  0
-.equ L_LN1_B,  768*4
-.equ L_QKV_W,  1536*4
-.equ L_QKV_B,  1771008*4
-.equ L_PROJ_W, 1773312*4
-.equ L_PROJ_B, 2363136*4
-.equ L_LN2_W,  2363904*4
-.equ L_LN2_B,  2364672*4
-.equ L_FC_W,   2365440*4
-.equ L_FC_B,   4724736*4
-.equ L_FCP_W,  4727808*4
-.equ L_FCP_B,  7087104*4
-.equ L_SIZE,   7087872*4
+// _tensors (src/load.s): pointers into model.safetensors.
+//   0 wte, 1 wpe, 2 ln_f.weight, 3 ln_f.bias, then 12 per block:
+//   ln_1 w/b, attn.c_attn w/b, attn.c_proj w/b, ln_2 w/b, mlp.c_fc w/b, mlp.c_proj w/b
+.equ N_TENSORS, 4 + 12*N_LAYER
 
-// Tokenizer file layout (see tools/export.py).
+// Tokenizer tables, built at startup by src/load.s.
 .equ T_BYTE2ID, 16
 .equ T_TABLE,   T_BYTE2ID + 256*4
 .equ T_HBITS,   17

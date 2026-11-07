@@ -14,16 +14,13 @@ _forward:
     stp     x23, x24, [sp, #48]
     mov     w23, w0
     mov     w22, w1
-    ADDR    x0, _g_weights
-    ldr     x19, [x0]
-    add     x19, x19, #W_HEADER      // x19 = wte
+    ADDR    x19, _tensors            // pointers into model.safetensors
 
     // x = wte[token] + wpe[pos]
+    ldp     x0, x1, [x19]
     mov     x2, #ROW
-    madd    x0, x23, x2, x19
-    MOV32   x3, WPE_OFF
-    add     x3, x19, x3
-    madd    x1, x22, x2, x3
+    madd    x0, x23, x2, x0
+    madd    x1, x22, x2, x1
     ADDR    x4, act_x
     mov     x5, #N_EMBD
 1:  ld1     {v0.4s, v1.4s}, [x0], #32
@@ -34,23 +31,18 @@ _forward:
     subs    x5, x5, #8
     b.ne    1b
 
-    MOV32   x20, LAYER0_OFF
-    add     x20, x19, x20            // x20 = current block weights
+    add     x20, x19, #32            // x20 = this block's 12 tensor pointers
     mov     x21, #0                  // layer index
 .Llayer:
     // h = ln_1(x)
     ADDR    x0, act_h
     ADDR    x1, act_x
-    add     x2, x20, #L_LN1_W
-    add     x3, x20, #L_LN1_B
+    ldp     x2, x3, [x20, #0]
     bl      _layernorm
     // qkv = h @ W_qkv + b
     ADDR    x0, act_qkv
     ADDR    x1, act_h
-    MOV32   x2, L_QKV_W
-    add     x2, x20, x2
-    MOV32   x3, L_QKV_B
-    add     x3, x20, x3
+    ldp     x2, x3, [x20, #16]
     mov     x4, #(3*N_EMBD)
     mov     x5, #N_EMBD
     bl      _matvec
@@ -84,10 +76,7 @@ _forward:
     // x += att @ W_proj + b
     ADDR    x0, act_tmp
     ADDR    x1, act_att
-    MOV32   x2, L_PROJ_W
-    add     x2, x20, x2
-    MOV32   x3, L_PROJ_B
-    add     x3, x20, x3
+    ldp     x2, x3, [x20, #32]
     mov     x4, #N_EMBD
     mov     x5, #N_EMBD
     bl      _matvec
@@ -97,18 +86,12 @@ _forward:
     // h = ln_2(x)
     ADDR    x0, act_h
     ADDR    x1, act_x
-    MOV32   x2, L_LN2_W
-    add     x2, x20, x2
-    MOV32   x3, L_LN2_B
-    add     x3, x20, x3
+    ldp     x2, x3, [x20, #48]
     bl      _layernorm
     // x += gelu(h @ W_fc + b) @ W_proj2 + b
     ADDR    x0, act_fc
     ADDR    x1, act_h
-    MOV32   x2, L_FC_W
-    add     x2, x20, x2
-    MOV32   x3, L_FC_B
-    add     x3, x20, x3
+    ldp     x2, x3, [x20, #64]
     mov     x4, #(4*N_EMBD)
     mov     x5, #N_EMBD
     bl      _matvec
@@ -117,10 +100,7 @@ _forward:
     bl      _gelu
     ADDR    x0, act_tmp
     ADDR    x1, act_fc
-    MOV32   x2, L_FCP_W
-    add     x2, x20, x2
-    MOV32   x3, L_FCP_B
-    add     x3, x20, x3
+    ldp     x2, x3, [x20, #80]
     mov     x4, #N_EMBD
     mov     x5, #(4*N_EMBD)
     bl      _matvec
@@ -128,21 +108,19 @@ _forward:
     ADDR    x1, act_tmp
     bl      _vec_add
 
-    MOV32   x0, L_SIZE
-    add     x20, x20, x0
+    add     x20, x20, #96
     add     x21, x21, #1
     cmp     x21, #N_LAYER
     b.lt    .Llayer
 
-    // x20 now points at ln_f. logits = ln_f(x) @ wte^T (tied weights)
+    // logits = ln_f(x) @ wte^T (tied weights; wte is one row per token)
     ADDR    x0, act_h
     ADDR    x1, act_x
-    mov     x2, x20
-    add     x3, x20, #ROW
+    ldp     x2, x3, [x19, #16]
     bl      _layernorm
     ADDR    x0, _logits
     ADDR    x1, act_h
-    mov     x2, x19
+    ldr     x2, [x19]
     mov     x3, #0
     MOV32   x4, N_VOCAB
     mov     x5, #N_EMBD

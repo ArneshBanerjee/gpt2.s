@@ -61,16 +61,21 @@ _main:
     cbz     x23, .Lusage
     cbz     x21, .Lusage
 
-    ADDR    x0, path_weights
-    MOV32   w1, 0x32545047           // "GPT2"
+    // the original Hugging Face files, read as they are
+    ADDR    x0, path_model
     bl      map_file
-    ADDR    x1, _g_weights
-    str     x0, [x1]
-    ADDR    x0, path_tok
-    MOV32   w1, 0x324b4f54           // "TOK2"
+    bl      _load_model
+    ADDR    x0, path_vocab
     bl      map_file
-    ADDR    x1, _g_tok
-    str     x0, [x1]
+    mov     x25, x0
+    mov     x26, x1
+    ADDR    x0, path_merges
+    bl      map_file
+    mov     x2, x0
+    mov     x3, x1
+    mov     x0, x25
+    mov     x1, x26
+    bl      _build_tokenizer
 
     mrs     x0, cntvct_el0           // seed the RNG from the hardware timer
     orr     x0, x0, #1
@@ -255,14 +260,13 @@ sample:
     ldp     x29, x30, [sp], #32
     ret
 
-// map_file(x0 = path, w1 = expected magic) -> x0 = read-only mapping
+// map_file(x0 = path) -> x0 = read-only mapping, x1 = size
 map_file:
     stp     x29, x30, [sp, #-48]!
     mov     x29, sp
     stp     x19, x20, [sp, #16]
     str     x21, [sp, #32]
     mov     x19, x0
-    mov     w20, w1
     mov     x1, #0                   // O_RDONLY
     mov     x2, #0
     SYSCALL SYS_OPEN
@@ -272,7 +276,9 @@ map_file:
     mov     x2, #2                   // SEEK_END -> file size
     SYSCALL SYS_LSEEK
     b.cs    1f
-    mov     x1, x0                   // length
+    cbz     x0, 1f                   // empty file
+    mov     x20, x0                  // length
+    mov     x1, x0
     mov     x0, #0
     mov     x2, #1                   // PROT_READ
     mov     x3, #2                   // MAP_PRIVATE
@@ -280,9 +286,7 @@ map_file:
     mov     x5, #0
     SYSCALL SYS_MMAP
     b.cs    1f
-    ldr     w1, [x0]
-    cmp     w1, w20
-    b.ne    1f
+    mov     x1, x20
     ldr     x21, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #48
@@ -369,8 +373,9 @@ parse_float:
 4:  ret
 
 .section __TEXT,__cstring,cstring_literals
-path_weights: .asciz "gpt2_124M.bin"
-path_tok:     .asciz "gpt2_tok.bin"
+path_model:   .asciz "model.safetensors"
+path_vocab:   .asciz "vocab.json"
+path_merges:  .asciz "merges.txt"
 s_nofile:     .asciz "gpt2: cannot load "
 s_newline:    .asciz "\n"
 s_space:      .asciz " "
@@ -383,8 +388,7 @@ s_usage:      .asciz "usage: gpt2 [-n tokens] [-t temperature] [-i] \"prompt\"\n
 
 .data
 .p2align 3
-.globl _g_weights, _g_tok
-_g_weights:   .quad 0
+.globl _g_tok
 _g_tok:       .quad 0
 rng_state:    .quad 0
 
