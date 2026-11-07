@@ -14,7 +14,7 @@ Alan Turing theorized that computers would one day become "more like machines." 
 [gpt2.s] 10 prompt + 60 generated tokens, 100.7 tok/s]
 ```
 
-## Numbers (Apple M1, one core)
+## Benchmarks
 
 | | Speed | Note |
 |---|---|---|
@@ -64,7 +64,7 @@ This script compares `./gpt2` with Hugging Face GPT-2 in PyTorch (fp32, greedy):
 
 The current result is `ALL PASS`.
 
-## How it works
+## Inner Workings
 
 | File | Contents |
 |---|---|
@@ -78,7 +78,7 @@ The weights are mapped into memory with `mmap`, so the program does no copy and
 has no allocator. All buffers, including the 75 MB KV cache, are zero-fill
 sections in the binary.
 
-## Honest limits
+## Limitations
 
 - **libSystem is linked but not used.** macOS on Apple Silicon kills static
   binaries at launch (SIGKILL), so the binary must name `libSystem.dylib` for
