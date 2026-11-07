@@ -90,3 +90,7 @@ sections in the binary.
 - **One thread, fp32.** The program is limited by memory bandwidth (it reads
   500 MB of weights for each token).
 - **The context is 1024 tokens**, the same as GPT-2.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
