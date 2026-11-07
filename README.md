@@ -18,7 +18,6 @@ Alan Turing theorized that computers would one day become "more like machines." 
 
 | | Speed | Note |
 |---|---|---|
-| GPT-2 in CSS | about 0.065 tok/s (15.3 s/token) | from the author's blog post |
 | PyTorch, CPU | 40 tok/s | `transformers` `generate`, same machine |
 | **gpt2.s** | **103 tok/s** | one thread, fp32 |
 
