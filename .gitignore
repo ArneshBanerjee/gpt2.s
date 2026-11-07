@@ -1,0 +1,10 @@
+# Model files (500 MB). Create them with: make weights
+*.bin
+
+# Build output
+build/
+/gpt2
+
+# Python
+.venv/
+__pycache__/
