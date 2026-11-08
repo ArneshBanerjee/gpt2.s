@@ -11,7 +11,7 @@
 .equ S_HBITS,   17                    // string -> id hash table: 131,072 slots
 .equ EMPTY,     0xFFFFFFFF
 // all 48 block matrices: 12 x (768x2304 + 768x768 + 768x3072 + 3072x768) floats
-.equ TRANSPOSED_BYTES, N_LAYER * (3 + 1 + 4 + 4) * N_EMBD * N_EMBD * 4
+.equ TILED_BYTES, N_LAYER * (3 + 1 + 4 + 4) * N_EMBD * N_EMBD * 4
 
 // GPT-2's byte-level alphabet maps every byte to a printable code point.
 // Code points below 256 are the byte itself. Code points 256 + n are the
@@ -104,18 +104,18 @@ _load_model:
     cmp     x21, #N_TENSORS
     b.ne    .Lmodel_bad
 
-    // The checkpoint stores the block matrices as [input][output]. The
-    // matvec kernel is fastest on [output][input], where each output is one
-    // dot product over one row read in order. So copy the 48 matrices once,
-    // transposed, into memory that we map for ourselves.
+    // The checkpoint stores the block matrices as [input][output]. Copy
+    // them once into tiles of 64 outputs, [output/64][input][64], in memory
+    // that we map for ourselves: then _matvec reads each matrix in order, and
+    // one load of x serves 64 outputs.
     mov     x0, #0
-    MOV32   x1, TRANSPOSED_BYTES
+    MOV32   x1, TILED_BYTES
     mov     x2, #3                   // PROT_READ | PROT_WRITE
     mov     x3, #0x1002              // MAP_ANON | MAP_PRIVATE
     mov     x4, #-1
     mov     x5, #0
     SYSCALL SYS_MMAP
-    b.cs    .Lmodel_bad
+    b.cs    .Lno_memory
     mov     x23, x0                  // next free byte in the new memory
     add     x24, x22, #32            // this block's 12 pointers
     mov     x25, #N_LAYER
@@ -129,7 +129,7 @@ _load_model:
     ldr     x1, [x24, x19, lsl #3]
     mov     x2, x20
     mov     x3, x21
-    bl      transpose
+    bl      tile_matrix
     str     x23, [x24, x19, lsl #3]
     mul     x0, x20, x21
     add     x23, x23, x0, lsl #2
@@ -140,53 +140,83 @@ _load_model:
     subs    x25, x25, #1
     b.ne    5b
 
+    // The output head reads wte (tied weights) as a matrix: tile it too, with
+    // its rows padded to whole tiles. The embedding lookup keeps reading wte.
+    mov     x0, #0
+    MOV32   x1, N_VOCAB_PAD*ROW
+    mov     x2, #3                   // PROT_READ | PROT_WRITE
+    mov     x3, #0x1002              // MAP_ANON | MAP_PRIVATE
+    mov     x4, #-1
+    mov     x5, #0
+    SYSCALL SYS_MMAP
+    b.cs    .Lno_memory
+    mov     x23, x0
+    ldr     x1, [x22]
+    MOV32   x2, N_VOCAB
+    bl      tile_rows
+    ADDR    x0, _head_w
+    str     x23, [x0]
+
     ldp     x25, x26, [sp, #64]
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #80
     ret
+.Lno_memory:
+    ADDR    x1, s_no_memory
+    b       fail
 .Lmodel_bad:
     ADDR    x1, s_bad_model
     b       fail
 
-// transpose(x0 = dst[nout][nin], x1 = src[nin][nout], x2 = nin, x3 = nout)
-// Reads 16 columns of one source row at a time and writes them down 16
-// destination rows. nout must be a multiple of 16. Leaf.
-transpose:
+// tile_matrix(x0 = dst, x1 = src[nin][nout], x2 = nin, x3 = nout): copy into
+// tiles of 64 outputs, dst[nout/64][nin][64]. nout must be a multiple of 64.
+// Leaf.
+tile_matrix:
     lsl     x4, x3, #2               // bytes in a source row
-    lsl     x5, x2, #2               // bytes in a destination row
-    mov     x6, #0                   // first of the 16 columns
-1:  add     x7, x1, x6, lsl #2
-    mul     x8, x6, x5
-    add     x8, x0, x8               // destination row x6
-    mov     x9, #0                   // source row
-2:  ld1     {v0.4s, v1.4s, v2.4s, v3.4s}, [x7]
+    mov     x6, #0                   // byte offset of this tile in a source row
+1:  add     x7, x1, x6
+    mov     x9, x2
+2:  mov     x8, x7
+    ld1     {v0.4s, v1.4s, v2.4s, v3.4s}, [x8], #64
+    ld1     {v4.4s, v5.4s, v6.4s, v7.4s}, [x8], #64
+    ld1     {v16.4s, v17.4s, v18.4s, v19.4s}, [x8], #64
+    ld1     {v20.4s, v21.4s, v22.4s, v23.4s}, [x8]
+    st1     {v0.4s, v1.4s, v2.4s, v3.4s}, [x0], #64
+    st1     {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64
+    st1     {v16.4s, v17.4s, v18.4s, v19.4s}, [x0], #64
+    st1     {v20.4s, v21.4s, v22.4s, v23.4s}, [x0], #64
     add     x7, x7, x4
-    add     x10, x8, x9, lsl #2
-    st1     {v0.s}[0], [x10], x5
-    st1     {v0.s}[1], [x10], x5
-    st1     {v0.s}[2], [x10], x5
-    st1     {v0.s}[3], [x10], x5
-    st1     {v1.s}[0], [x10], x5
-    st1     {v1.s}[1], [x10], x5
-    st1     {v1.s}[2], [x10], x5
-    st1     {v1.s}[3], [x10], x5
-    st1     {v2.s}[0], [x10], x5
-    st1     {v2.s}[1], [x10], x5
-    st1     {v2.s}[2], [x10], x5
-    st1     {v2.s}[3], [x10], x5
-    st1     {v3.s}[0], [x10], x5
-    st1     {v3.s}[1], [x10], x5
-    st1     {v3.s}[2], [x10], x5
-    st1     {v3.s}[3], [x10], x5
-    add     x9, x9, #1
-    cmp     x9, x2
-    b.lo    2b
-    add     x6, x6, #16
-    cmp     x6, x3
+    subs    x9, x9, #1
+    b.ne    2b
+    add     x6, x6, #256
+    cmp     x6, x4
     b.lo    1b
     ret
+
+// tile_rows(x0 = dst, x1 = src[n][768], x2 = n): the [n][768] rows of src
+// into tiles of 64 rows, dst[n/64][768][64]. Rows past n stay zero. Leaf.
+tile_rows:
+    mov     x9, #0                   // row
+    MOV32   x12, TILE_BYTES
+    mov     x14, #ROW
+1:  cmp     x9, x2
+    b.hs    3f
+    lsr     x10, x9, #6
+    madd    x13, x10, x12, x0
+    and     x11, x9, #63
+    add     x13, x13, x11, lsl #2    // dst: tile, then this row's lane
+    madd    x15, x9, x14, x1         // src row
+    mov     x7, #N_EMBD
+2:  ldr     s0, [x15], #4
+    str     s0, [x13]
+    add     x13, x13, #256           // next input: 64 floats on
+    subs    x7, x7, #1
+    b.ne    2b
+    add     x9, x9, #1
+    b       1b
+3:  ret
 
 // tensor_slot(x0 = name, x1 = length) -> x0 = slot in _tensors, or -1
 tensor_slot:
@@ -634,10 +664,12 @@ layer_names:
     .asciz "mlp.c_proj.bias"
     .byte 0
 s_bad_model: .asciz "gpt2: model.safetensors is not the GPT-2 small checkpoint\n"
+s_no_memory: .asciz "gpt2: not enough memory for the tiled weights\n"
 s_bad_tok:   .asciz "gpt2: cannot read vocab.json or merges.txt\n"
 
-.globl _tensors
+.globl _tensors, _head_w
 .zerofill __DATA,__bss,_tensors,N_TENSORS*8,3
+.zerofill __DATA,__bss,_head_w,8,3          // wte in tiles, for the output head
 .zerofill __DATA,__bss,tokdata,T_BLOB + BLOB_MAX,4
 .zerofill __DATA,__bss,strmap,(1 << S_HBITS)*4,4
 .zerofill __DATA,__bss,buf_a,256,4
