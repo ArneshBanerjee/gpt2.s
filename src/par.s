@@ -15,6 +15,7 @@
 .equ SYS_GETPID,  20
 .equ SYS_GETPPID, 39
 .equ SYS_FORK,    2
+.equ SYS_MUNMAP,  73
 .equ SYS_WAIT4,   7
 .equ SYS_SELECT,  93
 .equ MACH_SWTCH_PRI, -59             // Mach trap: give up the core for a moment
@@ -147,7 +148,11 @@ work:
     mov     x29, sp
     stp     x27, x28, [sp, #16]
     mov     w27, w0                  // tag (low 32 bits of seq)
-    lsl     x28, x26, #2             // row bytes
+    ADDR    x9, _half_mode
+    ldr     x9, [x9]
+    mov     x10, #2
+    sub     x9, x10, x9
+    lsl     x28, x26, x9             // row bytes: nin * 4, or nin * 2 in fp16
 .Lk_claim:
     add     x9, x19, #J_NEXT
     ldr     x10, [x9]
@@ -293,6 +298,78 @@ pjob:    stp     x29, x30, [sp, #-64]!
     ldp     x29, x30, [sp], #64
     ret
 
+// make_half(): -h. Convert the 48 block matrices and the output head's tiles
+// to fp16 in place: each region is packed into its first half and the second
+// half is given back. Packing is safe because every fp16 write lands at or
+// before fp32 data that has already been read. Call after _load_model, before
+// forking.
+.globl _make_half
+_make_half:
+    stp     x29, x30, [sp, #-48]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    ADDR    x19, _tensors
+    add     x20, x19, #32            // this block's 12 pointers
+    ldr     x22, [x20, #16]          // start of the tiled copy
+    mov     x21, x22                 // next free fp16 byte
+    mov     x9, #N_LAYER
+    str     x9, [sp, #-16]!
+1:
+    mov     x0, x21                  // attn.c_attn
+    ldr     x1, [x20, #16]
+    MOV32   x2, 3*N_EMBD*N_EMBD
+    bl      _to_half
+    str     x21, [x20, #16]
+    MOV32   x9, 3*N_EMBD*N_EMBD*2
+    add     x21, x21, x9
+    mov     x0, x21                  // attn.c_proj
+    ldr     x1, [x20, #32]
+    MOV32   x2, N_EMBD*N_EMBD
+    bl      _to_half
+    str     x21, [x20, #32]
+    MOV32   x9, N_EMBD*N_EMBD*2
+    add     x21, x21, x9
+    mov     x0, x21                  // mlp.c_fc
+    ldr     x1, [x20, #64]
+    MOV32   x2, 4*N_EMBD*N_EMBD
+    bl      _to_half
+    str     x21, [x20, #64]
+    MOV32   x9, 4*N_EMBD*N_EMBD*2
+    add     x21, x21, x9
+    mov     x0, x21                  // mlp.c_proj
+    ldr     x1, [x20, #80]
+    MOV32   x2, 4*N_EMBD*N_EMBD
+    bl      _to_half
+    str     x21, [x20, #80]
+    MOV32   x9, 4*N_EMBD*N_EMBD*2
+    add     x21, x21, x9
+    add     x20, x20, #96
+    ldr     x9, [sp]
+    subs    x9, x9, #1
+    str     x9, [sp]
+    b.ne    1b
+    add     sp, sp, #16
+    mov     x0, x21                  // give back the second half (whole pages:
+    sub     x1, x21, x22             // half the copy is a multiple of 16 KB)
+    SYSCALL SYS_MUNMAP
+    ADDR    x19, _head_w             // the head's tiles, the same way
+    ldr     x0, [x19]
+    mov     x1, x0
+    MOV32   x2, N_VOCAB_PAD*N_EMBD
+    bl      _to_half
+    ldr     x0, [x19]
+    MOV32   x1, N_VOCAB_PAD*N_EMBD*2
+    add     x0, x0, x1
+    SYSCALL SYS_MUNMAP
+    ADDR    x0, _half_mode
+    mov     x1, #1
+    str     x1, [x0]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
 // nap(): sleep 0.2 ms (select with no descriptors).
 nap:
     sub     sp, sp, #16
@@ -339,6 +416,8 @@ s_dead:       .ascii "\ngpt2: a worker process died\n"
 .p2align 3
 nworkers:     .quad 0
 shm_failed:   .quad 0
+.globl _half_mode
+_half_mode:   .quad 0                // 1: weights are fp16 (-h)
 
 // Shared section. _job first (page-aligned), the padding last, so whole pages
 // cover every buffer and nothing else.
