@@ -25,7 +25,7 @@ Alan Turing theorized that computers would one day become "more like machines." 
 | PyTorch, CPU | 40 tok/s | `transformers` `generate`, same machine |
 | **gpt2.s** | **90 to 100 tok/s** | one thread, fp32 |
 
-- Machine code: 6,324 bytes. Source: 1,834 lines of assembly.
+- Machine code: 6,896 bytes. Source: 1,986 lines of assembly.
 - Startup (parse all three files and prepare the weights): about 0.13 s.
 - The output is exact. Greedy output matches PyTorch token for token (see below).
 
@@ -82,19 +82,26 @@ The current result is `ALL PASS`.
 | `src/math.s` | NEON matrix-vector product, LayerNorm, softmax, GELU, and `expf` (range reduction and a degree-6 polynomial). |
 
 `model.safetensors` is mapped into memory with `mmap`. The checkpoint stores the
-48 block matrices as `[input][output]`. The matrix kernel is fastest on
-`[output][input]`, where each output is one dot product over one row read in
-order. So at startup the program copies those matrices once, transposed, into
-memory that it maps for itself (340 MB). All other buffers, including the 75 MB
-KV cache, are zero-fill sections in the binary, so there is no allocator.
+48 block matrices as `[input][output]`. At startup the program copies them once
+into tiles of 64 outputs, `[output/64][input][64]`, in memory that it maps for
+itself (340 MB). The matrix kernel keeps a tile's 64 sums in registers and
+reads the tile from start to end. One load of `x` brings 4 inputs, which serve
+all 64 outputs, so the weights are the only stream from memory. The output head
+uses `wte` the same way, so it gets a tiled copy too (154 MB, padded to 50,304
+rows); the embedding lookup still reads `wte` from the file.
+
+All other buffers, including the 75 MB KV cache, are zero-fill sections in the
+binary, so there is no allocator. The KV cache is stored by head,
+`[layer][head][position][64]`, so attention reads each head's keys and values
+in order.
 
 ## Limitations
 
 - **libSystem is linked but not used.** macOS on Apple Silicon kills static
   binaries at launch (SIGKILL), so the binary must name `libSystem.dylib` for
   the loader. `nm -u gpt2` is empty: the program imports zero symbols.
-- **More memory than the weights alone.** The transposed copy adds 340 MB to
-  the 550 MB file mapping.
+- **More memory than the weights alone.** The tiled copies add 340 MB (the
+  block matrices) and 154 MB (the output head) to the 550 MB file mapping.
 - **Non-ASCII text is approximate in the tokenizer.** Bytes of `0x80` and higher
   are treated as letters. ASCII text matches the GPT-2 tokenizer exactly.
 - **One thread, fp32.** The program is limited by memory bandwidth (it reads

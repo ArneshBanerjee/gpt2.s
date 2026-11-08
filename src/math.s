@@ -5,49 +5,150 @@
 .text
 .p2align 2
 
-// matvec(x0 out, x1 x, x2 W[nout][nin], x3 bias or 0, x4 nout, x5 nin)
-// out[i] = dot(W[i], x) + bias[i]. nin must be a multiple of 32.
+// matvec(x0 out, x1 x, x2 W, x3 bias or 0, x4 nout, x5 nin)
+// out[i] = sum_j W[i][j] * x[j] + bias[i], with W stored in tiles of 64 outputs,
+// [nout/64][nin][64] (src/load.s builds them). The 64 sums of a tile stay in
+// v0-v15. One load of x brings 4 inputs, used by element, so the weights are
+// the only stream read from memory, in order. nout must be a multiple of 64,
+// nin a multiple of 4.
 .globl _matvec
 _matvec:
+    stp     d8, d9, [sp, #-64]!
+    stp     d10, d11, [sp, #16]
+    stp     d12, d13, [sp, #32]
+    stp     d14, d15, [sp, #48]
 1:  mov     x6, x1
     mov     x7, x5
     movi    v0.16b, #0
     movi    v1.16b, #0
     movi    v2.16b, #0
     movi    v3.16b, #0
-    movi    v20.16b, #0
-    movi    v21.16b, #0
-    movi    v22.16b, #0
-    movi    v23.16b, #0
-2:  ld1     {v4.4s, v5.4s, v6.4s, v7.4s}, [x2], #64
-    ld1     {v16.4s, v17.4s, v18.4s, v19.4s}, [x6], #64
+    movi    v4.16b, #0
+    movi    v5.16b, #0
+    movi    v6.16b, #0
+    movi    v7.16b, #0
+    movi    v8.16b, #0
+    movi    v9.16b, #0
+    movi    v10.16b, #0
+    movi    v11.16b, #0
+    movi    v12.16b, #0
+    movi    v13.16b, #0
+    movi    v14.16b, #0
+    movi    v15.16b, #0
+2:  ld1     {v16.4s}, [x6], #16      // x[i..i+3]
     ld1     {v24.4s, v25.4s, v26.4s, v27.4s}, [x2], #64
-    ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x6], #64
-    fmla    v0.4s, v4.4s, v16.4s
-    fmla    v1.4s, v5.4s, v17.4s
-    fmla    v2.4s, v6.4s, v18.4s
-    fmla    v3.4s, v7.4s, v19.4s
-    fmla    v20.4s, v24.4s, v28.4s
-    fmla    v21.4s, v25.4s, v29.4s
-    fmla    v22.4s, v26.4s, v30.4s
-    fmla    v23.4s, v27.4s, v31.4s
-    subs    x7, x7, #32
+    ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x2], #64
+    fmla    v0.4s, v24.4s, v16.s[0]
+    fmla    v1.4s, v25.4s, v16.s[0]
+    fmla    v2.4s, v26.4s, v16.s[0]
+    fmla    v3.4s, v27.4s, v16.s[0]
+    fmla    v4.4s, v28.4s, v16.s[0]
+    fmla    v5.4s, v29.4s, v16.s[0]
+    fmla    v6.4s, v30.4s, v16.s[0]
+    fmla    v7.4s, v31.4s, v16.s[0]
+    ld1     {v24.4s, v25.4s, v26.4s, v27.4s}, [x2], #64
+    ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x2], #64
+    fmla    v8.4s, v24.4s, v16.s[0]
+    fmla    v9.4s, v25.4s, v16.s[0]
+    fmla    v10.4s, v26.4s, v16.s[0]
+    fmla    v11.4s, v27.4s, v16.s[0]
+    fmla    v12.4s, v28.4s, v16.s[0]
+    fmla    v13.4s, v29.4s, v16.s[0]
+    fmla    v14.4s, v30.4s, v16.s[0]
+    fmla    v15.4s, v31.4s, v16.s[0]
+    ld1     {v24.4s, v25.4s, v26.4s, v27.4s}, [x2], #64
+    ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x2], #64
+    fmla    v0.4s, v24.4s, v16.s[1]
+    fmla    v1.4s, v25.4s, v16.s[1]
+    fmla    v2.4s, v26.4s, v16.s[1]
+    fmla    v3.4s, v27.4s, v16.s[1]
+    fmla    v4.4s, v28.4s, v16.s[1]
+    fmla    v5.4s, v29.4s, v16.s[1]
+    fmla    v6.4s, v30.4s, v16.s[1]
+    fmla    v7.4s, v31.4s, v16.s[1]
+    ld1     {v24.4s, v25.4s, v26.4s, v27.4s}, [x2], #64
+    ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x2], #64
+    fmla    v8.4s, v24.4s, v16.s[1]
+    fmla    v9.4s, v25.4s, v16.s[1]
+    fmla    v10.4s, v26.4s, v16.s[1]
+    fmla    v11.4s, v27.4s, v16.s[1]
+    fmla    v12.4s, v28.4s, v16.s[1]
+    fmla    v13.4s, v29.4s, v16.s[1]
+    fmla    v14.4s, v30.4s, v16.s[1]
+    fmla    v15.4s, v31.4s, v16.s[1]
+    ld1     {v24.4s, v25.4s, v26.4s, v27.4s}, [x2], #64
+    ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x2], #64
+    fmla    v0.4s, v24.4s, v16.s[2]
+    fmla    v1.4s, v25.4s, v16.s[2]
+    fmla    v2.4s, v26.4s, v16.s[2]
+    fmla    v3.4s, v27.4s, v16.s[2]
+    fmla    v4.4s, v28.4s, v16.s[2]
+    fmla    v5.4s, v29.4s, v16.s[2]
+    fmla    v6.4s, v30.4s, v16.s[2]
+    fmla    v7.4s, v31.4s, v16.s[2]
+    ld1     {v24.4s, v25.4s, v26.4s, v27.4s}, [x2], #64
+    ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x2], #64
+    fmla    v8.4s, v24.4s, v16.s[2]
+    fmla    v9.4s, v25.4s, v16.s[2]
+    fmla    v10.4s, v26.4s, v16.s[2]
+    fmla    v11.4s, v27.4s, v16.s[2]
+    fmla    v12.4s, v28.4s, v16.s[2]
+    fmla    v13.4s, v29.4s, v16.s[2]
+    fmla    v14.4s, v30.4s, v16.s[2]
+    fmla    v15.4s, v31.4s, v16.s[2]
+    ld1     {v24.4s, v25.4s, v26.4s, v27.4s}, [x2], #64
+    ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x2], #64
+    fmla    v0.4s, v24.4s, v16.s[3]
+    fmla    v1.4s, v25.4s, v16.s[3]
+    fmla    v2.4s, v26.4s, v16.s[3]
+    fmla    v3.4s, v27.4s, v16.s[3]
+    fmla    v4.4s, v28.4s, v16.s[3]
+    fmla    v5.4s, v29.4s, v16.s[3]
+    fmla    v6.4s, v30.4s, v16.s[3]
+    fmla    v7.4s, v31.4s, v16.s[3]
+    ld1     {v24.4s, v25.4s, v26.4s, v27.4s}, [x2], #64
+    ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x2], #64
+    fmla    v8.4s, v24.4s, v16.s[3]
+    fmla    v9.4s, v25.4s, v16.s[3]
+    fmla    v10.4s, v26.4s, v16.s[3]
+    fmla    v11.4s, v27.4s, v16.s[3]
+    fmla    v12.4s, v28.4s, v16.s[3]
+    fmla    v13.4s, v29.4s, v16.s[3]
+    fmla    v14.4s, v30.4s, v16.s[3]
+    fmla    v15.4s, v31.4s, v16.s[3]
+    subs    x7, x7, #4
     b.ne    2b
-    fadd    v0.4s, v0.4s, v1.4s
-    fadd    v2.4s, v2.4s, v3.4s
-    fadd    v20.4s, v20.4s, v21.4s
-    fadd    v22.4s, v22.4s, v23.4s
-    fadd    v0.4s, v0.4s, v2.4s
-    fadd    v20.4s, v20.4s, v22.4s
-    fadd    v0.4s, v0.4s, v20.4s
-    faddp   v0.4s, v0.4s, v0.4s
-    faddp   s0, v0.2s
     cbz     x3, 3f
-    ldr     s1, [x3], #4
-    fadd    s0, s0, s1
-3:  str     s0, [x0], #4
-    subs    x4, x4, #1
+    ld1     {v16.4s, v17.4s, v18.4s, v19.4s}, [x3], #64
+    ld1     {v20.4s, v21.4s, v22.4s, v23.4s}, [x3], #64
+    ld1     {v24.4s, v25.4s, v26.4s, v27.4s}, [x3], #64
+    ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x3], #64
+    fadd    v0.4s, v0.4s, v16.4s
+    fadd    v1.4s, v1.4s, v17.4s
+    fadd    v2.4s, v2.4s, v18.4s
+    fadd    v3.4s, v3.4s, v19.4s
+    fadd    v4.4s, v4.4s, v20.4s
+    fadd    v5.4s, v5.4s, v21.4s
+    fadd    v6.4s, v6.4s, v22.4s
+    fadd    v7.4s, v7.4s, v23.4s
+    fadd    v8.4s, v8.4s, v24.4s
+    fadd    v9.4s, v9.4s, v25.4s
+    fadd    v10.4s, v10.4s, v26.4s
+    fadd    v11.4s, v11.4s, v27.4s
+    fadd    v12.4s, v12.4s, v28.4s
+    fadd    v13.4s, v13.4s, v29.4s
+    fadd    v14.4s, v14.4s, v30.4s
+    fadd    v15.4s, v15.4s, v31.4s
+3:  st1     {v0.4s, v1.4s, v2.4s, v3.4s}, [x0], #64
+    st1     {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64
+    st1     {v8.4s, v9.4s, v10.4s, v11.4s}, [x0], #64
+    st1     {v12.4s, v13.4s, v14.4s, v15.4s}, [x0], #64
+    subs    x4, x4, #64
     b.ne    1b
+    ldp     d10, d11, [sp, #16]
+    ldp     d12, d13, [sp, #32]
+    ldp     d14, d15, [sp, #48]
+    ldp     d8, d9, [sp], #64
     ret
 
 // layernorm(x0 out, x1 x, x2 gamma, x3 beta), n = 768, eps = 1e-5

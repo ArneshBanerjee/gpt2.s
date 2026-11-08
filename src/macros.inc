@@ -31,8 +31,10 @@
 
 // GPT-2 small
 .equ N_VOCAB,  50257
+.equ N_VOCAB_PAD, 50304             // rounded up to whole tiles of 64 rows
 .equ N_CTX,    1024
 .equ N_EMBD,   768
+.equ TILE_BYTES, N_EMBD*64*4        // one tile of 64 outputs x 768 inputs
 .equ N_LAYER,  12
 .equ N_HEAD,   12
 .equ EOT,      50256

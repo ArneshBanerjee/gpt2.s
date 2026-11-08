@@ -46,25 +46,41 @@ _forward:
     mov     x4, #(3*N_EMBD)
     mov     x5, #N_EMBD
     bl      _matvec
-    // append k, v to this layer's cache at row `pos`
+    // append k, v to this layer's cache at position `pos`. The cache is
+    // head-major, [layer][head][pos][64], so each head reads one stream.
     lsl     x24, x21, #10            // layer * N_CTX
     mov     x2, #ROW
     mul     x24, x24, x2             // byte offset of this layer's cache
     ADDR    x0, kcache
     add     x0, x0, x24
-    madd    x0, x22, x2, x0
+    add     x0, x0, x22, lsl #8      // + pos * 64 floats
     ADDR    x1, vcache
     add     x1, x1, x24
-    madd    x1, x22, x2, x1
+    add     x1, x1, x22, lsl #8
     ADDR    x3, act_qkv
     add     x3, x3, #ROW             // k part
     add     x4, x3, #ROW             // v part
-    mov     x5, #N_EMBD
+    mov     x5, #N_HEAD
+    MOV32   x6, N_CTX*256 - 192      // from this head's slot to the next one
 2:  ld1     {v0.4s, v1.4s, v2.4s, v3.4s}, [x3], #64
+    ld1     {v4.4s, v5.4s, v6.4s, v7.4s}, [x3], #64
+    ld1     {v16.4s, v17.4s, v18.4s, v19.4s}, [x3], #64
+    ld1     {v20.4s, v21.4s, v22.4s, v23.4s}, [x3], #64
     st1     {v0.4s, v1.4s, v2.4s, v3.4s}, [x0], #64
+    st1     {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64
+    st1     {v16.4s, v17.4s, v18.4s, v19.4s}, [x0], #64
+    st1     {v20.4s, v21.4s, v22.4s, v23.4s}, [x0]
+    ld1     {v0.4s, v1.4s, v2.4s, v3.4s}, [x4], #64
     ld1     {v4.4s, v5.4s, v6.4s, v7.4s}, [x4], #64
+    ld1     {v16.4s, v17.4s, v18.4s, v19.4s}, [x4], #64
+    ld1     {v20.4s, v21.4s, v22.4s, v23.4s}, [x4], #64
+    st1     {v0.4s, v1.4s, v2.4s, v3.4s}, [x1], #64
     st1     {v4.4s, v5.4s, v6.4s, v7.4s}, [x1], #64
-    subs    x5, x5, #16
+    st1     {v16.4s, v17.4s, v18.4s, v19.4s}, [x1], #64
+    st1     {v20.4s, v21.4s, v22.4s, v23.4s}, [x1]
+    add     x0, x0, x6
+    add     x1, x1, x6
+    subs    x5, x5, #1
     b.ne    2b
     // att = causal self-attention over positions 0..pos
     ADDR    x0, kcache
@@ -113,16 +129,17 @@ _forward:
     cmp     x21, #N_LAYER
     b.lt    .Llayer
 
-    // logits = ln_f(x) @ wte^T (tied weights; wte is one row per token)
+    // logits = ln_f(x) @ wte^T (tied weights), from wte's tiled copy
     ADDR    x0, act_h
     ADDR    x1, act_x
     ldp     x2, x3, [x19, #16]
     bl      _layernorm
     ADDR    x0, _logits
     ADDR    x1, act_h
-    ldr     x2, [x19]
+    ADDR    x2, _head_w
+    ldr     x2, [x2]
     mov     x3, #0
-    MOV32   x4, N_VOCAB
+    MOV32   x4, N_VOCAB_PAD
     mov     x5, #N_EMBD
     bl      _matvec
 
@@ -155,9 +172,9 @@ attention:
     ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x0], #64
     // scores[t] = q . k[t] / 8
     ADDR    x24, act_scores
-    add     x4, x19, x23
+    add     x4, x19, x22, lsl #18    // this head's keys: N_CTX rows of 64 floats
     mov     x6, #0
-    mov     x8, #ROW
+    mov     x8, #256
     fmov    s2, #0.125               // 1/sqrt(64)
 1:  madd    x7, x6, x8, x4
     ld1     {v4.4s, v5.4s, v6.4s, v7.4s}, [x7], #64
@@ -208,9 +225,9 @@ attention:
     movi    v29.16b, #0
     movi    v30.16b, #0
     movi    v31.16b, #0
-    add     x4, x20, x23
+    add     x4, x20, x22, lsl #18    // this head's values
     mov     x6, #0
-    mov     x8, #ROW
+    mov     x8, #256
 2:  ldr     s0, [x24, x6, lsl #2]
     madd    x7, x6, x8, x4
     ld1     {v4.4s, v5.4s, v6.4s, v7.4s}, [x7], #64
@@ -262,4 +279,4 @@ attention:
 .zerofill __DATA,__bss,kcache,N_LAYER*N_CTX*ROW,14
 .zerofill __DATA,__bss,vcache,N_LAYER*N_CTX*ROW,14
 .globl _logits
-.zerofill __DATA,__bss,_logits,(N_VOCAB+15)*4,6
+.zerofill __DATA,__bss,_logits,N_VOCAB_PAD*4,6
