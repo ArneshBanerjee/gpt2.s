@@ -13,9 +13,17 @@
 // nin a multiple of 4.
 .globl _matvec
 _matvec:
-    ADDR    x9, _half_mode
+    ADDR    x9, _use_sme             // -s: the SME2 kernels in sme.s
     ldr     x9, [x9]
-    cbnz    x9, _matvec_h
+    ADDR    x10, _half_mode
+    ldr     x10, [x10]
+    cbz     x9, .Lmv_neon
+    cbz     x10, .Lmv_sme32
+    b       _matvec_sme_h
+.Lmv_sme32:
+    b       _matvec_sme
+.Lmv_neon:
+    cbnz    x10, _matvec_h
     stp     d8, d9, [sp, #-64]!
     stp     d10, d11, [sp, #16]
     stp     d12, d13, [sp, #32]

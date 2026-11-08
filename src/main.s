@@ -2,13 +2,16 @@
 // No libc calls: all I/O is raw Darwin syscalls (svc #0x80), timing reads
 // the ARM generic timer directly, and exp/tanh/sampling are written here.
 //
-// usage: gpt2 [-n tokens] [-t temperature] [-j processes] [-h] [-i] "prompt"
+// usage: gpt2 [-n tokens] [-t temperature] [-j processes] [-h] [-s 0|1] [-i] "prompt"
 //   -n  tokens to generate (default 64)
 //   -t  sampling temperature, 0 = greedy (default 0.8)
 //   -j  processes working on each matrix product (default 1, at most the cores)
 //   -h  fp16 weights: half the memory traffic, no longer exact
+//   -s  0: matrix products with NEON; 1: with SME2 (default: SME2 if the CPU has
+//       it with 512-bit streaming vectors)
 //   -i  print token ids instead of text (line 1: prompt, line 2: output)
 .include "macros.inc"
+.arch_extension sme                  // rdsvl in has_sme2
 
 .text
 .p2align 2
@@ -53,6 +56,8 @@ _main:
     b.eq    .Lflag_t
     cmp     w1, #'j'
     b.eq    .Lflag_j
+    cmp     w1, #'s'
+    b.eq    .Lflag_s
     b       .Lusage
 .Lflag_i:
     mov     x22, #1
@@ -61,6 +66,17 @@ _main:
     ADDR    x1, want_half
     mov     x2, #1
     str     x2, [x1]
+    b       .Lnext
+.Lflag_s:
+    ldrb    w1, [x0]                 // exactly "0" or "1"
+    cbz     w1, .Lusage
+    ldrb    w2, [x0, #1]
+    cbnz    w2, .Lusage
+    sub     w1, w1, #'0'
+    cmp     w1, #1
+    b.hi    .Lusage
+    ADDR    x2, want_sme
+    str     x1, [x2]
     b       .Lnext
 .Lflag_n:
     bl      parse_uint
@@ -83,6 +99,25 @@ _main:
 .Largs_done:
     cbz     x23, .Lusage
     cbz     x21, .Lusage
+
+    // SME2 for the matrix products if the CPU has it, unless -s 0
+    ADDR    x0, want_half
+    ldr     x0, [x0]
+    bl      has_sme2
+    ADDR    x1, want_sme
+    ldr     x2, [x1]
+    cmp     x2, #2
+    b.eq    .Lsme_set                // no -s: use it if present
+    cbz     x2, .Lsme_off            // -s 0
+    cbnz    x0, .Lsme_set            // -s 1 and present
+    ADDR    x1, s_no_sme
+    mov     x0, #2
+    bl      print_str
+.Lsme_off:
+    mov     x0, #0
+.Lsme_set:
+    ADDR    x1, _use_sme
+    str     x0, [x1]
 
     // the original Hugging Face files, read as they are
     ADDR    x0, path_model
@@ -398,6 +433,72 @@ print_uint:
     add     sp, sp, #32
     ret
 
+// has_sme2(x0 = 1 for -h) -> x0 = 1 if sysctl hw.optional.arm.FEAT_SME2 is 1,
+// the streaming vector length is 512 bits (what src/sme.s is written for) and,
+// for -h, hw.optional.arm.FEAT_SME_F16F16 is 1 (the fp16 kernel's FCVTs);
+// else 0.
+.equ SME2_NAME_LEN, 25
+.equ F16F16_NAME_LEN, 31
+has_sme2:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    str     x19, [sp, #16]
+    mov     x19, x0
+    ADDR    x0, s_sme2_name
+    mov     x1, #SME2_NAME_LEN
+    bl      sysctl_flag
+    cbz     x0, 1f
+    cbz     x19, 2f
+    ADDR    x0, s_f16f16_name
+    mov     x1, #F16F16_NAME_LEN
+    bl      sysctl_flag
+    cbz     x0, 1f
+2:  rdsvl   x0, #1                   // SME is present, so this is safe to run:
+    cmp     x0, #64                  // streaming vector length in bytes
+    cset    x0, eq
+1:  ldr     x19, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+// sysctl_flag(x0 = name, x1 = its length) -> x0 = 1 if that sysctl is the int 1,
+// else 0. Raw sysctl, no libc: the name {0, 3} query turns the name into its
+// numeric id, then a second call reads the value. Any failure means no.
+sysctl_flag:
+    sub     sp, sp, #112
+    mov     x4, x0
+    mov     x5, x1
+    mov     w0, #0
+    mov     w1, #3
+    stp     w0, w1, [sp]             // mib {0, 3}: name -> id
+    mov     x0, #64
+    str     x0, [sp, #8]             // room for the id: 16 ints
+    mov     x0, sp
+    mov     x1, #2
+    add     x2, sp, #16              // the id
+    add     x3, sp, #8               // its size in bytes
+    SYSCALL SYS_SYSCTL
+    b.cs    1f
+    ldr     x1, [sp, #8]
+    lsr     x1, x1, #2               // id length in ints
+    add     x0, sp, #16
+    str     wzr, [sp, #80]           // the value (int)
+    mov     x2, #4
+    str     x2, [sp, #88]            // its size
+    add     x2, sp, #80
+    add     x3, sp, #88
+    mov     x4, #0
+    mov     x5, #0
+    SYSCALL SYS_SYSCTL
+    b.cs    1f
+    ldr     w0, [sp, #80]
+    cmp     w0, #1
+    cset    x0, eq
+    add     sp, sp, #112
+    ret
+1:  mov     x0, #0
+    add     sp, sp, #112
+    ret
+
 // parse_uint(x0 = string) -> x0
 parse_uint:
     mov     x1, x0
@@ -446,7 +547,10 @@ s_stats0:     .asciz "\n\n[gpt2.s] "
 s_stats1:     .asciz " prompt + "
 s_stats2:     .asciz " generated tokens, "
 s_stats3:     .asciz " tok/s]\n"
-s_usage:      .asciz "usage: gpt2 [-n tokens] [-t temperature] [-j processes] [-h] [-i] \"prompt\"\n"
+s_no_sme:     .asciz "gpt2: no usable SME2 here (needs SME2 with 512-bit streaming vectors, and SME_F16F16 for -h), using NEON\n"
+s_sme2_name:  .asciz "hw.optional.arm.FEAT_SME2"
+s_f16f16_name: .asciz "hw.optional.arm.FEAT_SME_F16F16"
+s_usage:      .asciz "usage: gpt2 [-n tokens] [-t temperature] [-j processes] [-h] [-s 0|1] [-i] \"prompt\"\n"
 
 .data
 .p2align 3
@@ -456,6 +560,9 @@ rng_state:    .quad 0
 njobs:        .quad 0
 ncpus:        .quad 1
 want_half:    .quad 0
+.globl _use_sme
+_use_sme:     .quad 0                // 1: matrix products use the SME2 kernels (sme.s)
+want_sme:     .quad 2                // -s 0 / -s 1; 2 = not given: use SME2 if present
 
 .globl _tokens
 .zerofill __DATA,__bss,_tokens,N_CTX*4,4
