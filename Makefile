@@ -1,4 +1,4 @@
-SRC := src/main.s src/load.s src/tok.s src/model.s src/math.s
+SRC := src/main.s src/load.s src/tok.s src/model.s src/math.s src/par.s
 OBJ := $(SRC:src/%.s=build/%.o)
 SDK := $(shell xcrun --show-sdk-path)
 HF  := https://huggingface.co/openai-community/gpt2/resolve/main

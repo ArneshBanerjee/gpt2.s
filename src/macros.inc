@@ -29,6 +29,8 @@
 .equ SYS_MMAP,   197
 .equ SYS_LSEEK,  199
 
+.equ SYS_SYSCTL, 202
+
 // GPT-2 small
 .equ N_VOCAB,  50257
 .equ N_VOCAB_PAD, 50304             // rounded up to whole tiles of 64 rows
