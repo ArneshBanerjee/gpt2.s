@@ -25,7 +25,7 @@ Alan Turing theorized that computers would one day become "more like machines." 
 | PyTorch, CPU | 40 tok/s | `transformers` `generate`, same machine |
 | **gpt2.s** | **90 to 100 tok/s** | one thread, fp32 |
 
-- Machine code: 8,172 bytes. Source: 2,385 lines of assembly.
+- Machine code: 9,368 bytes. Source: 2,692 lines of assembly.
 - Startup (parse all three files and prepare the weights): about 0.13 s.
 - The output is exact. Greedy output matches PyTorch token for token (see below).
 
@@ -59,6 +59,11 @@ Options:
   the same for every `N`. Whether it helps depends on the chip: on an M1 one
   core already uses the memory bandwidth (no gain), on an M6 `-j 8` is about
   1.5x faster.
+- `-h` stores the weight matrices (the 48 block matrices and the output head)
+  as fp16, which halves the memory traffic. Embeddings, biases, LayerNorm
+  weights, products and sums stay fp32. The output is no longer exact: greedy
+  text can take a different word where two are nearly tied. With half the bytes,
+  more processes help on an M1 too: `-h -j 4` was up to 1.2x faster than `-h`.
 - `-i` prints token ids instead of text. Line 1 is the prompt. Line 2 is the output.
 
 ## Verify
@@ -123,6 +128,9 @@ it. Attention is split the same way, one head per claim.
   each token. More processes (`-j`) help only where one core can't use all the
   memory bandwidth: on an M1 they don't (`-j 7` was 9% slower than one core),
   on an M6 about 1.4x with 2 processes and 1.5x with 8.
+- **`-h` uses about 200 MB less memory after startup.** The tiled copies are
+  built in fp32, converted to fp16 in place, and their second halves are given
+  back, so the peak during startup is the same as without `-h`.
 - **Processes spin while they wait.** During generation every process keeps a
   core busy. A waiting process spins for a moment, then gives up its core, and
   an idle worker sleeps 0.2 ms at a time. Workers exit when the program ends or

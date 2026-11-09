@@ -2,10 +2,11 @@
 // No libc calls: all I/O is raw Darwin syscalls (svc #0x80), timing reads
 // the ARM generic timer directly, and exp/tanh/sampling are written here.
 //
-// usage: gpt2 [-n tokens] [-t temperature] [-j processes] [-i] "prompt"
+// usage: gpt2 [-n tokens] [-t temperature] [-j processes] [-h] [-i] "prompt"
 //   -n  tokens to generate (default 64)
 //   -t  sampling temperature, 0 = greedy (default 0.8)
 //   -j  processes working on each matrix product (default 1, at most the cores)
+//   -h  fp16 weights: half the memory traffic, no longer exact
 //   -i  print token ids instead of text (line 1: prompt, line 2: output)
 .include "macros.inc"
 
@@ -40,6 +41,8 @@ _main:
     cbnz    w2, .Lprompt
     cmp     w1, #'i'
     b.eq    .Lflag_i
+    cmp     w1, #'h'
+    b.eq    .Lflag_h
     add     x24, x24, #1
     cmp     x24, x19
     b.ge    .Lusage
@@ -53,6 +56,11 @@ _main:
     b       .Lusage
 .Lflag_i:
     mov     x22, #1
+    b       .Lnext
+.Lflag_h:
+    ADDR    x1, want_half
+    mov     x2, #1
+    str     x2, [x1]
     b       .Lnext
 .Lflag_n:
     bl      parse_uint
@@ -80,6 +88,11 @@ _main:
     ADDR    x0, path_model
     bl      map_file
     bl      _load_model
+    ADDR    x0, want_half
+    ldr     x0, [x0]
+    cbz     x0, 1f
+    bl      _make_half
+1:
     ADDR    x0, path_vocab
     bl      map_file
     mov     x25, x0
@@ -433,7 +446,7 @@ s_stats0:     .asciz "\n\n[gpt2.s] "
 s_stats1:     .asciz " prompt + "
 s_stats2:     .asciz " generated tokens, "
 s_stats3:     .asciz " tok/s]\n"
-s_usage:      .asciz "usage: gpt2 [-n tokens] [-t temperature] [-j processes] [-i] \"prompt\"\n"
+s_usage:      .asciz "usage: gpt2 [-n tokens] [-t temperature] [-j processes] [-h] [-i] \"prompt\"\n"
 
 .data
 .p2align 3
@@ -442,6 +455,7 @@ _g_tok:       .quad 0
 rng_state:    .quad 0
 njobs:        .quad 0
 ncpus:        .quad 1
+want_half:    .quad 0
 
 .globl _tokens
 .zerofill __DATA,__bss,_tokens,N_CTX*4,4
