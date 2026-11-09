@@ -45,7 +45,7 @@ _forward:
     ldp     x2, x3, [x20, #16]
     mov     x4, #(3*N_EMBD)
     mov     x5, #N_EMBD
-    bl      _matvec
+    bl      _pmatvec
     // append k, v to this layer's cache at position `pos`. The cache is
     // head-major, [layer][head][pos][64], so each head reads one stream.
     lsl     x24, x21, #10            // layer * N_CTX
@@ -88,14 +88,14 @@ _forward:
     ADDR    x1, vcache
     add     x1, x1, x24
     mov     x2, x22
-    bl      attention
+    bl      _pattention
     // x += att @ W_proj + b
     ADDR    x0, act_tmp
     ADDR    x1, act_att
     ldp     x2, x3, [x20, #32]
     mov     x4, #N_EMBD
     mov     x5, #N_EMBD
-    bl      _matvec
+    bl      _pmatvec
     ADDR    x0, act_x
     ADDR    x1, act_tmp
     bl      _vec_add
@@ -110,7 +110,7 @@ _forward:
     ldp     x2, x3, [x20, #64]
     mov     x4, #(4*N_EMBD)
     mov     x5, #N_EMBD
-    bl      _matvec
+    bl      _pmatvec
     ADDR    x0, act_fc
     mov     x1, #(4*N_EMBD)
     bl      _gelu
@@ -119,7 +119,7 @@ _forward:
     ldp     x2, x3, [x20, #80]
     mov     x4, #N_EMBD
     mov     x5, #(4*N_EMBD)
-    bl      _matvec
+    bl      _pmatvec
     ADDR    x0, act_x
     ADDR    x1, act_tmp
     bl      _vec_add
@@ -141,7 +141,7 @@ _forward:
     mov     x3, #0
     MOV32   x4, N_VOCAB_PAD
     mov     x5, #N_EMBD
-    bl      _matvec
+    bl      _pmatvec
 
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
@@ -149,9 +149,11 @@ _forward:
     ldp     x29, x30, [sp], #64
     ret
 
-// attention(x0 = layer K cache, x1 = layer V cache, x2 = pos) -> act_att
-// 12 heads of 64 dims. Reads q from act_qkv.
-attention:
+// attention_head(x0 = layer K cache, x1 = layer V cache, x2 = T, x3 = head)
+// One of the 12 heads (64 dims) over positions 0..T-1. Reads q from act_qkv,
+// writes the head's 64 outputs to act_att. Each head has its own score row.
+.globl _attention_head
+_attention_head:
     stp     x29, x30, [sp, #-64]!
     mov     x29, sp
     stp     x19, x20, [sp, #16]
@@ -159,9 +161,8 @@ attention:
     stp     x23, x24, [sp, #48]
     mov     x19, x0
     mov     x20, x1
-    add     x21, x2, #1              // T = pos + 1
-    mov     x22, #0                  // head
-.Lhead:
+    mov     x21, x2                  // T
+    mov     x22, x3                  // head
     lsl     x23, x22, #8             // head * 64 floats * 4 bytes
     // q for this head -> v16..v31
     ADDR    x0, act_qkv
@@ -172,6 +173,7 @@ attention:
     ld1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x0], #64
     // scores[t] = q . k[t] / 8
     ADDR    x24, act_scores
+    add     x24, x24, x22, lsl #12   // head * N_CTX * 4
     add     x4, x19, x22, lsl #18    // this head's keys: N_CTX rows of 64 floats
     mov     x6, #0
     mov     x8, #256
@@ -259,24 +261,10 @@ attention:
     st1     {v20.4s, v21.4s, v22.4s, v23.4s}, [x0], #64
     st1     {v24.4s, v25.4s, v26.4s, v27.4s}, [x0], #64
     st1     {v28.4s, v29.4s, v30.4s, v31.4s}, [x0], #64
-    add     x22, x22, #1
-    cmp     x22, #N_HEAD
-    b.lt    .Lhead
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #64
     ret
 
-// Activations and KV cache (zero-filled, no allocator needed).
-.zerofill __DATA,__bss,act_x,N_EMBD*4,6
-.zerofill __DATA,__bss,act_h,N_EMBD*4,6
-.zerofill __DATA,__bss,act_qkv,3*N_EMBD*4,6
-.zerofill __DATA,__bss,act_att,N_EMBD*4,6
-.zerofill __DATA,__bss,act_tmp,N_EMBD*4,6
-.zerofill __DATA,__bss,act_fc,4*N_EMBD*4,6
-.zerofill __DATA,__bss,act_scores,N_CTX*4,6
-.zerofill __DATA,__bss,kcache,N_LAYER*N_CTX*ROW,14
-.zerofill __DATA,__bss,vcache,N_LAYER*N_CTX*ROW,14
-.globl _logits
-.zerofill __DATA,__bss,_logits,N_VOCAB_PAD*4,6
+// The activations and the KV cache are in par.s (shared with the workers).

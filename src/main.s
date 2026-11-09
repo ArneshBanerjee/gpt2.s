@@ -2,9 +2,10 @@
 // No libc calls: all I/O is raw Darwin syscalls (svc #0x80), timing reads
 // the ARM generic timer directly, and exp/tanh/sampling are written here.
 //
-// usage: gpt2 [-n tokens] [-t temperature] [-i] "prompt"
+// usage: gpt2 [-n tokens] [-t temperature] [-j processes] [-i] "prompt"
 //   -n  tokens to generate (default 64)
 //   -t  sampling temperature, 0 = greedy (default 0.8)
+//   -j  processes working on each matrix product (default 1, at most the cores)
 //   -i  print token ids instead of text (line 1: prompt, line 2: output)
 .include "macros.inc"
 
@@ -15,6 +16,13 @@
 _main:
     mov     x19, x0                  // argc
     mov     x20, x1                  // argv
+    bl      _shm_init                // activations shared with the workers
+    bl      ncpu
+    ADDR    x1, ncpus
+    str     x0, [x1]
+    mov     x0, #1                   // default -j 1: whether more processes help
+    ADDR    x1, njobs                // depends on the chip (see README)
+    str     x0, [x1]
     mov     x21, #64                 // tokens to generate
     FCONST  s8, 0x3f4ccccd           // temperature 0.8
     mov     x22, #0                  // id mode
@@ -40,6 +48,8 @@ _main:
     b.eq    .Lflag_n
     cmp     w1, #'t'
     b.eq    .Lflag_t
+    cmp     w1, #'j'
+    b.eq    .Lflag_j
     b       .Lusage
 .Lflag_i:
     mov     x22, #1
@@ -51,6 +61,11 @@ _main:
 .Lflag_t:
     bl      parse_float
     fmov    s8, s0
+    b       .Lnext
+.Lflag_j:
+    bl      parse_uint
+    ADDR    x1, njobs
+    str     x0, [x1]
     b       .Lnext
 .Lprompt:
     mov     x23, x0
@@ -111,7 +126,16 @@ _main:
     bl      print_str
 
     // run the prompt through the model
-4:  mov     x26, #0
+4:  ADDR    x0, njobs
+    ldr     x0, [x0]
+    ADDR    x1, ncpus                // never more processes than cores
+    ldr     x1, [x1]
+    cmp     x0, x1
+    csel    x0, x0, x1, lo
+    subs    x0, x0, #1               // -j counts main too
+    csel    x0, xzr, x0, lt
+    bl      _start_workers
+    mov     x26, #0
 5:  ADDR    x1, _tokens
     ldr     w0, [x1, x26, lsl #2]
     mov     w1, w26
@@ -139,6 +163,7 @@ _main:
     b.ge    .Lgen_done
     cmp     x26, #N_CTX
     b.ge    .Lgen_done
+    bl      _check_workers           // a dead worker stops the run
     mov     w0, w24
     mov     w1, w26
     bl      _forward
@@ -147,6 +172,7 @@ _main:
 .Lgen_done:
     mrs     x0, cntvct_el0
     sub     x27, x0, x27             // elapsed ticks
+    bl      _stop_workers
 
     // stats on stderr: [P prompt + G generated tokens, X.Y tok/s]
     ADDR    x1, s_stats0
@@ -258,6 +284,29 @@ sample:
     b.lt    4b
 5:  ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
+    ret
+
+// ncpu() -> x0 = hw.ncpu through the raw sysctl syscall, or 1 if it fails
+ncpu:
+    sub     sp, sp, #32
+    mov     w0, #6                   // CTL_HW
+    mov     w1, #3                   // HW_NCPU
+    stp     w0, w1, [sp]
+    mov     w0, #1
+    str     w0, [sp, #8]             // result, if the call fails
+    mov     x0, #4
+    str     x0, [sp, #16]            // result size
+    mov     x0, sp
+    mov     x1, #2
+    add     x2, sp, #8
+    add     x3, sp, #16
+    mov     x4, #0
+    mov     x5, #0
+    SYSCALL SYS_SYSCTL
+    ldr     w0, [sp, #8]
+    cmp     w0, #1
+    csinc   w0, w0, wzr, ge          // at least 1
+    add     sp, sp, #32
     ret
 
 // map_file(x0 = path) -> x0 = read-only mapping, x1 = size
@@ -384,13 +433,15 @@ s_stats0:     .asciz "\n\n[gpt2.s] "
 s_stats1:     .asciz " prompt + "
 s_stats2:     .asciz " generated tokens, "
 s_stats3:     .asciz " tok/s]\n"
-s_usage:      .asciz "usage: gpt2 [-n tokens] [-t temperature] [-i] \"prompt\"\n"
+s_usage:      .asciz "usage: gpt2 [-n tokens] [-t temperature] [-j processes] [-i] \"prompt\"\n"
 
 .data
 .p2align 3
 .globl _g_tok
 _g_tok:       .quad 0
 rng_state:    .quad 0
+njobs:        .quad 0
+ncpus:        .quad 1
 
 .globl _tokens
 .zerofill __DATA,__bss,_tokens,N_CTX*4,4

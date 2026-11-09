@@ -25,7 +25,7 @@ Alan Turing theorized that computers would one day become "more like machines." 
 | PyTorch, CPU | 40 tok/s | `transformers` `generate`, same machine |
 | **gpt2.s** | **90 to 100 tok/s** | one thread, fp32 |
 
-- Machine code: 6,896 bytes. Source: 1,986 lines of assembly.
+- Machine code: 8,172 bytes. Source: 2,385 lines of assembly.
 - Startup (parse all three files and prepare the weights): about 0.13 s.
 - The output is exact. Greedy output matches PyTorch token for token (see below).
 
@@ -54,6 +54,11 @@ Options:
 
 - `-n N` sets the number of tokens to generate. The default is 64.
 - `-t T` sets the sampling temperature. `0` means greedy. The default is 0.8.
+- `-j N` sets how many processes share each matrix product and the attention
+  heads. The default is 1; `N` is capped at the number of cores. The output is
+  the same for every `N`. Whether it helps depends on the chip: on an M1 one
+  core already uses the memory bandwidth (no gain), on an M6 `-j 8` is about
+  1.5x faster.
 - `-i` prints token ids instead of text. Line 1 is the prompt. Line 2 is the output.
 
 ## Verify
@@ -80,6 +85,7 @@ The current result is `ALL PASS`.
 | `src/tok.s` | GPT-2 pre-tokenizer rules and byte-level BPE. Merges are found in an open-addressing hash table. |
 | `src/model.s` | The forward pass for one token: embeddings, 12 blocks, 12-head attention with a KV cache, final LayerNorm, tied output head. |
 | `src/math.s` | NEON matrix-vector product, LayerNorm, softmax, GELU, and `expf` (range reduction and a degree-6 polynomial). |
+| `src/par.s` | Worker processes (`-j`): `fork`, the shared-memory section, and the job protocol that splits matrix rows and attention heads between processes. |
 
 `model.safetensors` is mapped into memory with `mmap`. The checkpoint stores the
 48 block matrices as `[input][output]`. At startup the program copies them once
@@ -95,6 +101,15 @@ binary, so there is no allocator. The KV cache is stored by head,
 `[layer][head][position][64]`, so attention reads each head's keys and values
 in order.
 
+Threads would need libpthread (a new Darwin thread starts in its entry point),
+so `-j` uses processes. At startup, before anything is written to them, the
+activations and the KV cache (one section, `__DATA,__shm`) are remapped as
+shared memory. After loading, the program forks its workers. The weights stay
+shared copy-on-write because nobody writes them. Each matrix product is one
+job: every process claims one tile (64 rows) at a time with compare-and-swap and runs the
+same `matvec` on them, so a row gives the same bits whichever process computes
+it. Attention is split the same way, one head per claim.
+
 ## Limitations
 
 - **libSystem is linked but not used.** macOS on Apple Silicon kills static
@@ -104,8 +119,15 @@ in order.
   block matrices) and 154 MB (the output head) to the 550 MB file mapping.
 - **Non-ASCII text is approximate in the tokenizer.** Bytes of `0x80` and higher
   are treated as letters. ASCII text matches the GPT-2 tokenizer exactly.
-- **One thread, fp32.** The program is limited by memory bandwidth (it reads
-  about 500 MB of weights for each token).
+- **fp32, limited by memory bandwidth.** It reads about 500 MB of weights for
+  each token. More processes (`-j`) help only where one core can't use all the
+  memory bandwidth: on an M1 they don't (`-j 7` was 9% slower than one core),
+  on an M6 about 1.4x with 2 processes and 1.5x with 8.
+- **Processes spin while they wait.** During generation every process keeps a
+  core busy. A waiting process spins for a moment, then gives up its core, and
+  an idle worker sleeps 0.2 ms at a time. Workers exit when the program ends or
+  is killed (they check that the parent is still alive). If a worker dies, the
+  program stops with an error instead of waiting for its rows.
 - **The context is 1024 tokens**, the same as GPT-2.
 
 ## License
