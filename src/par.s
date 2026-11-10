@@ -7,9 +7,10 @@
 // MAP_SHARED at startup, before anything is written to it.
 //
 // A job is one matvec. Every process (main included) claims chunks of CHUNK
-// rows with compare-and-swap and runs the ordinary _matvec on them. A row is
-// computed by the same code whoever claims it, so the output is bit-identical
-// to the single-process run.
+// rows with compare-and-swap and runs the ordinary _matvec on them (in main
+// that can be the SME2 kernel, which gives the same bits as NEON). A row comes
+// out the same whoever claims it, so the output is bit-identical to the
+// single-process run.
 .include "macros.inc"
 
 .equ SYS_GETPID,  20
@@ -98,7 +99,12 @@ _stop_workers:
 // worker: never returns. x20 = parent pid.
 // Waiting: spin, then give up the core (swtch_pri), then sleep 0.2 ms at a
 // time, checking that main is still alive.
+// Workers use NEON for their rows even when main uses SME2 (-s): several
+// processes on SME2 at once were slower than one on the M6 (see README).
+// Both kernels give the same bits, so the output does not change.
 worker:
+    ADDR    x9, _use_sme             // this process's own copy (after fork)
+    str     xzr, [x9]
     ADDR    x19, _job
     mov     x27, #0                  // last job seen
     mov     x28, #0                  // spins since the last job

@@ -25,13 +25,14 @@ Alan Turing theorized that computers would one day become "more like machines." 
 | PyTorch, CPU | 40 tok/s | `transformers` `generate`, same machine |
 | **gpt2.s** | **90 to 100 tok/s** | one thread, fp32 |
 
-- Machine code: 9,368 bytes. Source: 2,692 lines of assembly.
+- Machine code: 10,136 bytes. Source: 2,945 lines of assembly.
 - Startup (parse all three files and prepare the weights): about 0.13 s.
 - The output is exact. Greedy output matches PyTorch token for token (see below).
 
 ## Build and run
 
-You need macOS on Apple Silicon and the Xcode command line tools.
+You need macOS on Apple Silicon and the Xcode command line tools (with an
+assembler that knows SME2; tested with Apple clang 21).
 
 ```bash
 make weights
@@ -57,13 +58,20 @@ Options:
 - `-j N` sets how many processes share each matrix product and the attention
   heads. The default is 1; `N` is capped at the number of cores. The output is
   the same for every `N`. Whether it helps depends on the chip: on an M1 one
-  core already uses the memory bandwidth (no gain), on an M6 `-j 8` is about
-  1.5x faster.
+  core already uses the memory bandwidth (no gain), on an M6 with NEON (`-s 0`)
+  `-j 8` is about 1.5x faster. With SME2 (the default on an M6) one process is
+  already as fast as that in fp32; see the table below.
 - `-h` stores the weight matrices (the 48 block matrices and the output head)
   as fp16, which halves the memory traffic. Embeddings, biases, LayerNorm
   weights, products and sums stay fp32. The output is no longer exact: greedy
   text can take a different word where two are nearly tied. With half the bytes,
   more processes help on an M1 too: `-h -j 4` was up to 1.2x faster than `-h`.
+- `-s 0|1` picks how the matrix products run: `0` with NEON, `1` with SME2
+  (Arm's Scalable Matrix Extension 2). The default is SME2 when the CPU has it
+  with 512-bit streaming vectors (and, for `-h`, its fp16 conversions). Only
+  the main process uses SME2; worker processes (`-j`) keep NEON. The output is
+  the same. On an M6 the fastest setting overall is `-h -j 8 -s 0` (NEON in
+  every process), 2-3% ahead of `-h -j 8`.
 - `-i` prints token ids instead of text. Line 1 is the prompt. Line 2 is the output.
 
 ## Verify
@@ -90,6 +98,7 @@ The current result is `ALL PASS`.
 | `src/tok.s` | GPT-2 pre-tokenizer rules and byte-level BPE. Merges are found in an open-addressing hash table. |
 | `src/model.s` | The forward pass for one token: embeddings, 12 blocks, 12-head attention with a KV cache, final LayerNorm, tied output head. |
 | `src/math.s` | NEON matrix-vector product, LayerNorm, softmax, GELU, and `expf` (range reduction and a degree-6 polynomial). |
+| `src/sme.s` | The same matrix-vector product with SME2 (Arm's Scalable Matrix Extension 2), fp32 and fp16: a tile's 64 sums in the ZA array, multi-vector loads, indexed FMLA. |
 | `src/par.s` | Worker processes (`-j`): `fork`, the shared-memory section, and the job protocol that splits matrix rows and attention heads between processes. |
 
 `model.safetensors` is mapped into memory with `mmap`. The checkpoint stores the
@@ -100,6 +109,31 @@ reads the tile from start to end. One load of `x` brings 4 inputs, which serve
 all 64 outputs, so the weights are the only stream from memory. The output head
 uses `wte` the same way, so it gets a tiled copy too (154 MB, padded to 50,304
 rows); the embedding lookup still reads `wte` from the file.
+
+On CPUs with SME2 the matrix products use it by default (found with
+`sysctl hw.optional.arm.FEAT_SME2`, raw syscall, and a 512-bit streaming vector
+length, which the kernel is written for; `-h` also needs
+`hw.optional.arm.FEAT_SME_F16F16`). In a microbenchmark on an M6, one thread
+using SME2 read memory at about 141 GB/s, against about 87 GB/s for one thread
+using NEON. It adds into each sum in the same order, so the output is
+bit-identical (NaN payloads aside). The fp16 kernel widens the weights to fp32
+first, like the NEON one, so `-h` gives the same output with either.
+
+With `-j` above 1, only the main process uses SME2 and the workers keep NEON;
+they claim tiles from the same counter, so main simply takes more of them. In
+the same microbenchmark, more SME2 threads at once did not add throughput (one
+thread 141 GB/s, two 141 GB/s in total, four 112), and with every process on
+SME2 `-h -j 8` was 9-14% slower than with NEON workers. GPT-2 small on the M6,
+greedy, tok/s at 200 / 800 tokens:
+
+| | NEON | SME2 in main |
+|---|---|---|
+| `-j 1` | 183 / 166 | **283 / 257** |
+| `-j 2` | 254 / 240 | 266 / 251 |
+| `-j 8` | 278 / 264 | 273 / 261 |
+| `-h -j 1` | 269 / 229 | 447 / 394 |
+| `-h -j 2` | 390 / 363 | 473 / 427 |
+| `-h -j 8` | **512 / 470** | 498 / 460 |
 
 All other buffers, including the 75 MB KV cache, are zero-fill sections in the
 binary, so there is no allocator. The KV cache is stored by head,
@@ -127,7 +161,8 @@ it. Attention is split the same way, one head per claim.
 - **fp32, limited by memory bandwidth.** It reads about 500 MB of weights for
   each token. More processes (`-j`) help only where one core can't use all the
   memory bandwidth: on an M1 they don't (`-j 7` was 9% slower than one core),
-  on an M6 about 1.4x with 2 processes and 1.5x with 8.
+  on an M6 with NEON (`-s 0`) about 1.4x with 2 processes and 1.5x with 8.
+  With SME2, one process reads about as fast as 8 NEON processes.
 - **`-h` uses about 200 MB less memory after startup.** The tiled copies are
   built in fp32, converted to fp16 in place, and their second halves are given
   back, so the peak during startup is the same as without `-h`.
